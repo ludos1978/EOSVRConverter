@@ -1,8 +1,9 @@
 import numpy as np
 import cv2
+import sys
 from subprocess import Popen
 from multiprocessing import Pool
-from subprocess import Popen, STDOUT
+from subprocess import Popen, STDOUT, PIPE
 from tqdm import tqdm
 from os import mkdir, listdir, cpu_count
 import os
@@ -11,6 +12,13 @@ from glob import glob
 import pickle
 from enum import Enum
 from pathlib import Path
+import lut3d
+from functools import partial
+import numpy as np
+from pillow_lut import load_cube_file
+
+# download canon lut from  (bottom of the page)
+# https://tools.rodrigopolo.com/canonluts/ 
 
 TOPAZ_BIN = r"C:\Program Files\Topaz Labs LLC\Topaz Sharpen AI\Topaz Sharpen AI.exe"
 
@@ -222,7 +230,7 @@ class FisheyeToEquirectangular:
             mkdir(frames_outdir)
         
         log_outfile_mp4_to_pngs = os.path.join(video_outdir, f"{videofn_stem}-mp4_to_pngs-log.txt")
-        png_outdir = os.path.join(frames_outdir, "%5d.png")
+        png_outdir = os.path.join(frames_outdir, "%05d.png")
         if (args.mp4_to_pngs):
             print ("--- mp4_to_pngs ---")
             # Example 1: don't do color grading
@@ -235,27 +243,76 @@ class FisheyeToEquirectangular:
             # Cube files can be downloaded from Canon website.
             # ffmpegCommand = ['ffmpeg', '-i', videofn, '-qscale:v', '2', '-vf', 'lut3d=BT2020_CanonLog3-to-BT709_WideDR_33_FF_Ver.2.0.cube', png_outdir]
             with open(log_outfile_mp4_to_pngs, 'w+') as f:
-                exe = Popen(ffmpegCommand, stdout=f, stderr=STDOUT)
+                exe = Popen(ffmpegCommand, stdout=PIPE, stderr=STDOUT, universal_newlines=True, text=True)
+                for line in exe.stdout:
+                    # line = line.decode("utf-8")
+                    #   Duration: 00:00:41.58, start: 0.000000, bitrate: 439623 kb/s
+                    if line.lstrip().startswith('Duration:'):
+                        duration = line.lstrip().removeprefix('Duration:').strip().split(' ')[0].rstrip(',')
+                        print (f"duration: {duration}")
+                        # print (f"  '{line}'")
+                    #   Stream #0:0[0x1](und): Video: hevc (Rext) (hvc1 / 0x31637668), yuv420p12le(tv, bt709), 4096x2160 [SAR 1:1 DAR 256:135], 438659 kb/s, 59.94 fps, 59.94 tbr, 60k tbn (default)
+                    if (line.lstrip().startswith('Stream')) and ('fps,' in line):
+                        fps = line.split(' fps,')[0].split(' ')[-1]
+                        print (f"fps: {fps}")
+                        # print (f"'{line}'    '{line.split(' fps,')[-1]}'")
+                    # frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A    
+                    # frame=   12 fps=3.0 q=-0.0 size=N/A time=00:00:00.20 bitrate=N/A speed=0.0494x    
+                    if line.strip().startswith('frame='):
+                        framenum = line.strip().removeprefix('frame=').strip().split(' ')[0]
+                        # print (f'X', end='', flush=True)
+                        # sys.stdout.flush()
+                        print (f"{framenum}")
+                        # print (f" '{line}'")
+                    # print (line, end="")
+                    # sys.stdout.flush()
+                    f.write(line)
                 exe.wait()
-        
+                
         if (args.mp4_to_pngs_opencv):
             print ("--- mp4_to_pngs_opencv ---")
             cam = cv2.VideoCapture(str(videofn))
+            # has no influence, but valid
+            # cam.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'h264')) # h264, mp4v, MJPG
+            # stops working
+            # cam.set(cv2.IMREAD_ANYDEPTH, 1)
+            # no influence, but valid
+            # cam.set(cv2.CAP_PROP_FORMAT, cv2.CV_32FC1)
             if not cam.isOpened():
                 print ("Error when reading image file")
-            # cam.get(0)
-            # cam.grab()
+
+            lut = None
+            if (args.lut3d is not None):
+                lut = load_cube_file(args.lut3d)
+                # lut = lut3d.read_lut_file(args.lut3d)
+
             print (f"--- length {cam.get(cv2.CAP_PROP_FRAME_COUNT)} ---")
-            index = 0
+            index = 1
             while True:
-                ret, frame = cam.read()
-                if not frame:
+                ret, frame = cam.read(cv2.IMREAD_ANYDEPTH)
+                if frame is None:
                     break
+                if lut is not None:
+                    # pixels = frame.reshape(-1, 3)
+                    # convert = partial(lut3d._convert, lut=lut)
+                    # new_pixels = list(map(convert, tqdm(pixels)))
+                    # frame = np.array(new_pixels).reshape(frame.shape)
+                    # frame = (frame * 255).astype('uint8')
+
+                    frame = cv2.LUT(frame, lut)
+                    
+                    calibrate = cv.createCalibrateDebevec()
+                    response = calibrate.process(frame, times)
+
+                    # pil image filter
+                    # im.filter(lut).save("image-with-lut-applied.png")
+
                 cv2.imwrite(png_outdir % index, frame)
                 index += 1
                 print ("X", end="", flush=True)
+                # cv2.LUT(frame, cv2.COLORMAP_JET, frame)
             cam.release()
-        
+                
         # Also extract the audio to be combined to the final video
         log_outfile_mp4_to_aac = os.path.join(video_outdir, f"{videofn_stem}-mp4_to_aac-log.txt")
         audio_out_fname = f'{videofn_stem}_audio.aac'
@@ -291,7 +348,8 @@ class FisheyeToEquirectangular:
 
 class Args:
     mp4_to_pngs = True
-    mp4_to_pngs_opencv = False
+    # is bad, can not handle hdr images
+    mp4_to_pngs_opencv = True
     mp4_to_aac = True
     png_unwrap = True
     png_to_mp4 = True
@@ -302,13 +360,14 @@ class Args:
     side = 3600
 
     frames_v = None
+    # extremely slow!!! 20sec / frame!!!
+    lut3d = None
 
 # overwrite for 4k video resolution
 args = Args()
-mp4_to_pngs = False
-mp4_to_pngs_opencv = True
 args.n = 2048
 args.side = 1800
+# args.lut3d = "BT2020_CanonLog3-to-BT709_WideDR_33_FF_Ver.2.0.cube"
 # process only 100 frames
 #args.frames_v = 100
 
