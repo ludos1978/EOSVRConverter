@@ -1,3 +1,9 @@
+# Notes from the corrections / updates
+
+- when converting from fisheye to equirectangular the images are converted to 8bit only from 16bits colors
+- use create_venv.command to install the python packages
+- correct the path at the beginning of EOSVRConverter.py to match the created venv-directory
+
 # EOS VR Converter
 
 This repo provides an alternative workflow than the EOS VR Utility for Canon's great VR lens.
